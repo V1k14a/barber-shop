@@ -25,6 +25,7 @@ services:
       DATABASE_URL: postgresql://${POSTGRES_USER:-salon}:${POSTGRES_PASSWORD:-salon}@db:5432/${POSTGRES_DB:-salon}?schema=public
       SEED_OWNER_PASSWORD: ${SEED_OWNER_PASSWORD:-changeme123}
       SEED_STAFF_PASSWORD: ${SEED_STAFF_PASSWORD:-changeme123}
+      PRISMA_HIDE_UPDATE_MESSAGE: "1"
     command: sh -c "npx prisma migrate deploy && npx prisma db seed"
     depends_on:
       db:

@@ -21,12 +21,12 @@ RUN npx prisma generate && npm run build
 # ---- runner: minimal production image ---------------------------------------
 FROM node:22-alpine AS runner
 WORKDIR /app
-RUN apk add --no-cache openssl libc6-compat \
- && addgroup -S nodejs -g 1001 && adduser -S nextjs -u 1001 -G nodejs
+RUN apk add --no-cache openssl libc6-compat
 ENV NODE_ENV=production NEXT_TELEMETRY_DISABLED=1 PORT=3000 HOSTNAME=0.0.0.0
 COPY --from=builder /app/public ./public
-COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
-COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
-USER nextjs
+COPY --from=builder --chown=node:node /app/.next/standalone ./
+COPY --from=builder --chown=node:node /app/.next/static ./.next/static
+# Run as the unprivileged "node" user that ships with the official image.
+USER node
 EXPOSE 3000
 CMD ["node", "server.js"]
