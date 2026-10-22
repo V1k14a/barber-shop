@@ -200,3 +200,56 @@ describe("moving and cancelling", () => {
     await expect(cancelBooking(db, b.id)).rejects.toMatchObject({ code: "BOOKING_NOT_FOUND" });
   });
 });
+
+describe("reminder e-mails", () => {
+  // Booking on Tue 3 Nov; reminders go out on Mon 2 Nov from 10:00 local.
+  const mondayNoon = new Date("2026-11-02T11:00:00Z");
+  const collect = () => {
+    const sent: { to: string; subject: string }[] = [];
+    return { sent, send: async (m: { to: string; subject: string }) => void sent.push(m) };
+  };
+
+  it("sends one reminder per booking the day before, never twice", async () => {
+    const b = await book({});
+    await db.booking.update({ where: { id: b.id }, data: { createdAt: new Date("2026-10-20T10:00:00Z") } });
+    const { sendDueReminders } = await import("@/lib/email/reminders");
+
+    const early = collect();
+    expect(await sendDueReminders(db, new Date("2026-11-02T07:00:00Z"), early.send)).toMatchObject({ sent: 0 }); // 08:00 local
+    const first = collect();
+    await sendDueReminders(db, mondayNoon, first.send);
+    expect(first.sent).toHaveLength(1);
+    expect(first.sent[0].subject).toBe("Reminder: see you tomorrow at 10:00");
+    const again = collect();
+    await sendDueReminders(db, new Date("2026-11-02T12:00:00Z"), again.send);
+    expect(again.sent).toHaveLength(0);
+  });
+
+  it("skips cancelled bookings, bookings without e-mail and bookings made less than 24 h ahead", async () => {
+    const { sendDueReminders } = await import("@/lib/email/reminders");
+    const old = new Date("2026-10-20T10:00:00Z");
+    const a = await book({ startsAt: at("09:00") });
+    const c = await book({ startsAt: at("11:00"), customerEmail: "" });
+    const d = await book({ startsAt: at("12:00") }); // createdAt = now (late booking)
+    await db.booking.update({ where: { id: a.id }, data: { createdAt: old, status: "CANCELLED" } });
+    await db.booking.update({ where: { id: c.id }, data: { createdAt: old } });
+    await db.booking.update({ where: { id: d.id }, data: { createdAt: new Date("2026-11-02T20:00:00Z") } });
+    const r = collect();
+    await sendDueReminders(db, mondayNoon, r.send);
+    expect(r.sent).toHaveLength(0);
+  });
+
+  it("releases the claim when sending fails, so the next run retries", async () => {
+    const { sendDueReminders } = await import("@/lib/email/reminders");
+    const b = await book({});
+    await db.booking.update({ where: { id: b.id }, data: { createdAt: new Date("2026-10-20T10:00:00Z") } });
+    const failing = async () => {
+      throw new Error("SMTP down");
+    };
+    expect(await sendDueReminders(db, mondayNoon, failing)).toMatchObject({ sent: 0 });
+    expect((await db.booking.findUniqueOrThrow({ where: { id: b.id } })).reminderSentAt).toBeNull();
+    const r = collect();
+    await sendDueReminders(db, mondayNoon, r.send);
+    expect(r.sent).toHaveLength(1);
+  });
+});

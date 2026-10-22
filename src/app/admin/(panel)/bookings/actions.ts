@@ -1,5 +1,6 @@
 "use server";
 
+import { after } from "next/server";
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { z } from "zod";
@@ -42,7 +43,7 @@ export async function createAdminBooking(_: ActionState, fd: FormData): Promise<
   } catch (e) {
     return toActionError(e);
   }
-  if (sendEmail && input.customerEmail) await notifyBookingConfirmed(bookingId);
+  if (sendEmail && input.customerEmail) after(() => notifyBookingConfirmed(bookingId));
   revalidatePath("/admin/calendar");
   redirect(`/admin/bookings/${bookingId}?created=1`);
 }
@@ -60,7 +61,7 @@ export async function moveAdminBooking(_: ActionState, fd: FormData): Promise<Ac
   } catch (e) {
     return toActionError(e);
   }
-  if (notify) await notifyBookingMoved(bookingId);
+  if (notify) after(() => notifyBookingMoved(bookingId));
   revalidatePath("/admin/calendar");
   redirect(`/admin/bookings/${bookingId}?moved=1`);
 }
@@ -74,7 +75,8 @@ export async function cancelAdminBooking(_: ActionState, fd: FormData): Promise<
   } catch (e) {
     return toActionError(e);
   }
-  if (parsed.data.notify) await notifyBookingCancelled(parsed.data.bookingId, "salon");
+  const cancelledId = parsed.data.bookingId;
+  if (parsed.data.notify) after(() => notifyBookingCancelled(cancelledId, "salon"));
   revalidatePath("/admin/calendar");
   redirect(`/admin/bookings/${parsed.data.bookingId}?cancelled=1`);
 }

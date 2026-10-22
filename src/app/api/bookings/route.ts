@@ -1,4 +1,4 @@
-import { NextResponse, type NextRequest } from "next/server";
+import { after, NextResponse, type NextRequest } from "next/server";
 import { prisma } from "@/lib/db";
 import { createBooking } from "@/lib/booking/service";
 import { notifyBookingConfirmed } from "@/lib/booking/notifications";
@@ -26,7 +26,7 @@ export async function POST(req: NextRequest) {
   if (website) return jsonError(400, "Invalid request"); // honeypot filled → bot
   try {
     const booking = await createBooking(prisma, { ...input, mode: "customer" });
-    await notifyBookingConfirmed(booking.id);
+    after(() => notifyBookingConfirmed(booking.id)); // send after responding
     const employee = await prisma.employee.findUnique({ where: { id: booking.employeeId }, select: { name: true } });
     return NextResponse.json(
       {
