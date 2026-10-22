@@ -1,7 +1,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { prisma } from "@/lib/db";
 import { createBooking } from "@/lib/booking/service";
-import { onBookingCreated } from "@/lib/booking/notifications";
+import { notifyBookingConfirmed } from "@/lib/booking/notifications";
 import { bookingRequestSchema, fieldErrors } from "@/lib/validation";
 import { handleApiError, jsonError } from "@/lib/api";
 import { clientIp, rateLimit } from "@/lib/rate-limit";
@@ -26,7 +26,7 @@ export async function POST(req: NextRequest) {
   if (website) return jsonError(400, "Invalid request"); // honeypot filled → bot
   try {
     const booking = await createBooking(prisma, { ...input, mode: "customer" });
-    await onBookingCreated(booking.id);
+    await notifyBookingConfirmed(booking.id);
     const employee = await prisma.employee.findUnique({ where: { id: booking.employeeId }, select: { name: true } });
     return NextResponse.json(
       {

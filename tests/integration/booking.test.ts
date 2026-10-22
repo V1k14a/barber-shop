@@ -1,7 +1,7 @@
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
 import { PrismaClient } from "@prisma/client";
 import { DateTime } from "luxon";
-import { createBooking, getAvailableSlots } from "@/lib/booking/service";
+import { cancelBooking, cancelBookingByToken, createBooking, getAvailableSlots, moveBooking } from "@/lib/booking/service";
 import { BookingError } from "@/lib/booking/errors";
 
 const db = new PrismaClient();
@@ -165,5 +165,38 @@ describe("simultaneous requests (no double bookings)", () => {
         },
       }),
     ).rejects.toThrow(/Booking_no_overlap|23P01/);
+  });
+});
+
+describe("moving and cancelling", () => {
+  it("moves a booking, ignoring its own old time", async () => {
+    const b = await book({});
+    const moved = await moveBooking(db, { bookingId: b.id, employeeId: "mads", startsAt: at("10:15") });
+    expect(moved.startsAt.toISOString()).toBe(at("10:15").toISOString());
+    expect(moved.endsAt.toISOString()).toBe(at("10:45").toISOString());
+  });
+
+  it("refuses to move onto another booking or to an unqualified employee", async () => {
+    const a = await book({ startsAt: at("10:00") });
+    await book({ startsAt: at("11:00") });
+    await expect(moveBooking(db, { bookingId: a.id, employeeId: "mads", startsAt: at("10:45") })).rejects.toMatchObject({ code: "SLOT_UNAVAILABLE" });
+    await expect(moveBooking(db, { bookingId: a.id, employeeId: "emma", startsAt: at("12:00") })).rejects.toMatchObject({ code: "EMPLOYEE_NOT_QUALIFIED" });
+  });
+
+  it("customers can cancel up to 24 hours before, not later", async () => {
+    const b = await book({});
+    await expect(cancelBookingByToken(db, b.cancelToken, new Date(at("10:01").getTime() - 24 * 3600_000))).rejects.toMatchObject({
+      code: "CANCELLATION_TOO_LATE",
+    });
+    const c = await cancelBookingByToken(db, b.cancelToken, new Date(at("10:00").getTime() - 24 * 3600_000));
+    expect(c.status).toBe("CANCELLED");
+    await expect(cancelBookingByToken(db, b.cancelToken, NOW)).rejects.toMatchObject({ code: "BOOKING_NOT_FOUND" });
+    await expect(cancelBookingByToken(db, "wrong-token", NOW)).rejects.toMatchObject({ code: "BOOKING_NOT_FOUND" });
+  });
+
+  it("staff cancellation works only once", async () => {
+    const b = await book({});
+    await cancelBooking(db, b.id);
+    await expect(cancelBooking(db, b.id)).rejects.toMatchObject({ code: "BOOKING_NOT_FOUND" });
   });
 });

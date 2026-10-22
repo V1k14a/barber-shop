@@ -35,3 +35,31 @@ body {
 .no-scrollbar::-webkit-scrollbar {
   display: none;
 }
+
+/* ---- Admin UI primitives: large touch targets for tablets/phones ---- */
+@layer components {
+  .btn {
+    @apply inline-flex min-h-12 items-center justify-center gap-2 px-5 py-3 text-base tracking-wide transition select-none disabled:opacity-50;
+  }
+  .btn-primary {
+    @apply bg-ink text-paper hover:bg-ink/85;
+  }
+  .btn-secondary {
+    @apply border border-ink bg-white hover:bg-ink hover:text-paper;
+  }
+  .btn-quiet {
+    @apply border border-line bg-white hover:border-ink;
+  }
+  .btn-danger {
+    @apply border border-danger bg-white text-danger hover:bg-danger hover:text-white;
+  }
+  .input {
+    @apply min-h-12 w-full border border-line bg-white px-4 py-2.5 text-base focus:border-ink focus:outline-none;
+  }
+  .label {
+    @apply mb-1.5 block text-sm text-muted;
+  }
+  .card {
+    @apply border border-line bg-white p-4 sm:p-6;
+  }
+}

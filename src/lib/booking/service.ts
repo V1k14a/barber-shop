@@ -173,67 +173,18 @@ function isRetryableConflict(e: unknown): boolean {
 }
 
 /**
- * Creates a booking. Availability is checked again inside a SERIALIZABLE
- * transaction right before insert; together with the database exclusion
- * constraint this guarantees that two customers can never get the same slot.
- * On a conflict the whole check is retried, so a "No preference" booking can
- * still land on another free employee.
+ * Runs `fn` in a SERIALIZABLE transaction, retrying on serialization
+ * failures and overlap violations. After the last attempt the conflict is
+ * reported as SLOT_UNAVAILABLE.
  */
-export async function createBooking(db: PrismaClient, input: CreateBookingInput): Promise<Booking> {
-  const mode = input.mode ?? "customer";
+async function serializable<T>(db: PrismaClient, fn: (tx: Prisma.TransactionClient) => Promise<T>): Promise<T> {
   for (let attempt = 1; ; attempt++) {
     try {
-      return await db.$transaction(
-        async (tx) => {
-          const now = input.now ?? new Date();
-          const option = await getActiveOption(tx, input.optionId);
-          const rules = await getBookingRules(tx);
-          const start = input.startsAt.getTime();
-
-          if (mode === "customer" && !isWithinBookingWindow(start, now, rules)) {
-            throw new BookingError("OUTSIDE_BOOKING_WINDOW");
-          }
-
-          const qualified = (await getQualifiedEmployees(tx, option.serviceId)).map((e) => e.id);
-          const candidates = input.employeeId ? qualified.filter((id) => id === input.employeeId) : qualified;
-          if (input.employeeId && candidates.length === 0) throw new BookingError("EMPLOYEE_NOT_QUALIFIED");
-
-          const date = toLocalDate(start, rules.timezone);
-          const { schedules, bookingCounts } = await loadSchedules(tx, candidates, date, rules.timezone);
-          const free = schedules.filter((s) =>
-            mode === "customer"
-              ? isSlotAvailable(s, start, { durationMin: option.durationMin, bufferMin: option.bufferMin, now }, rules)
-              : fitsSchedule(s, start, option.durationMin, option.bufferMin, rules.timezone),
-          );
-          if (free.length === 0) throw new BookingError("SLOT_UNAVAILABLE");
-
-          const employeeId = pickEmployee(
-            free.map((s) => s.employeeId),
-            bookingCounts,
-            qualified,
-          );
-
-          return tx.booking.create({
-            data: {
-              optionId: option.id,
-              employeeId,
-              customerName: input.customerName,
-              customerPhone: input.customerPhone,
-              customerEmail: input.customerEmail,
-              note: input.note ?? "",
-              startsAt: new Date(start),
-              endsAt: new Date(start + option.durationMin * MINUTE),
-              blockedUntil: new Date(start + (option.durationMin + option.bufferMin) * MINUTE),
-              durationMin: option.durationMin,
-              bufferMin: option.bufferMin,
-              priceOre: option.priceOre,
-              source: mode === "staff" ? "ADMIN" : "ONLINE",
-              cancelToken: randomBytes(24).toString("base64url"),
-            },
-          });
-        },
-        { isolationLevel: Prisma.TransactionIsolationLevel.Serializable, maxWait: 10_000, timeout: 15_000 },
-      );
+      return await db.$transaction(fn, {
+        isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
+        maxWait: 10_000,
+        timeout: 15_000,
+      });
     } catch (e) {
       if (e instanceof BookingError) throw e;
       if (isRetryableConflict(e)) {
@@ -244,4 +195,148 @@ export async function createBooking(db: PrismaClient, input: CreateBookingInput)
       throw e;
     }
   }
+}
+
+/**
+ * Creates a booking. Availability is checked again inside a SERIALIZABLE
+ * transaction right before insert; together with the database exclusion
+ * constraint this guarantees that two customers can never get the same slot.
+ * On a conflict the whole check is retried, so a "No preference" booking can
+ * still land on another free employee.
+ */
+export async function createBooking(db: PrismaClient, input: CreateBookingInput): Promise<Booking> {
+  const mode = input.mode ?? "customer";
+  return serializable(db, async (tx) => {
+    const now = input.now ?? new Date();
+    const option = await getActiveOption(tx, input.optionId);
+    const rules = await getBookingRules(tx);
+    const start = input.startsAt.getTime();
+
+    if (mode === "customer" && !isWithinBookingWindow(start, now, rules)) {
+      throw new BookingError("OUTSIDE_BOOKING_WINDOW");
+    }
+
+    const qualified = (await getQualifiedEmployees(tx, option.serviceId)).map((e) => e.id);
+    const candidates = input.employeeId ? qualified.filter((id) => id === input.employeeId) : qualified;
+    if (input.employeeId && candidates.length === 0) throw new BookingError("EMPLOYEE_NOT_QUALIFIED");
+
+    const date = toLocalDate(start, rules.timezone);
+    const { schedules, bookingCounts } = await loadSchedules(tx, candidates, date, rules.timezone);
+    const free = schedules.filter((s) =>
+      mode === "customer"
+        ? isSlotAvailable(s, start, { durationMin: option.durationMin, bufferMin: option.bufferMin, now }, rules)
+        : fitsSchedule(s, start, option.durationMin, option.bufferMin, rules.timezone),
+    );
+    if (free.length === 0) throw new BookingError("SLOT_UNAVAILABLE");
+
+    const employeeId = pickEmployee(
+      free.map((s) => s.employeeId),
+      bookingCounts,
+      qualified,
+    );
+
+    return tx.booking.create({
+      data: {
+        optionId: option.id,
+        employeeId,
+        customerName: input.customerName,
+        customerPhone: input.customerPhone,
+        customerEmail: input.customerEmail,
+        note: input.note ?? "",
+        startsAt: new Date(start),
+        endsAt: new Date(start + option.durationMin * MINUTE),
+        blockedUntil: new Date(start + (option.durationMin + option.bufferMin) * MINUTE),
+        durationMin: option.durationMin,
+        bufferMin: option.bufferMin,
+        priceOre: option.priceOre,
+        source: mode === "staff" ? "ADMIN" : "ONLINE",
+        cancelToken: randomBytes(24).toString("base64url"),
+      },
+    });
+  });
+}
+
+/**
+ * Staff: move a booking to a new time and/or employee. Keeps the booking's
+ * duration, buffer and price. The booking itself is ignored when checking
+ * availability, so it can be shifted by a few minutes.
+ */
+export async function moveBooking(
+  db: PrismaClient,
+  input: { bookingId: string; employeeId: string; startsAt: Date },
+): Promise<Booking> {
+  return serializable(db, async (tx) => {
+    const booking = await tx.booking.findUnique({ where: { id: input.bookingId }, include: { option: true } });
+    if (!booking || booking.status !== "CONFIRMED") throw new BookingError("BOOKING_NOT_FOUND");
+    const rules = await getBookingRules(tx);
+
+    const qualified = await tx.employeeService.findFirst({
+      where: { employeeId: input.employeeId, serviceId: booking.option.serviceId, employee: { active: true } },
+    });
+    if (!qualified) throw new BookingError("EMPLOYEE_NOT_QUALIFIED");
+
+    const start = input.startsAt.getTime();
+    const date = toLocalDate(start, rules.timezone);
+    const { schedules } = await loadSchedules(tx, [input.employeeId], date, rules.timezone, { excludeBookingId: booking.id });
+    if (!fitsSchedule(schedules[0], start, booking.durationMin, booking.bufferMin, rules.timezone)) {
+      throw new BookingError("SLOT_UNAVAILABLE");
+    }
+
+    return tx.booking.update({
+      where: { id: booking.id },
+      data: {
+        employeeId: input.employeeId,
+        startsAt: new Date(start),
+        endsAt: new Date(start + booking.durationMin * MINUTE),
+        blockedUntil: new Date(start + (booking.durationMin + booking.bufferMin) * MINUTE),
+        reminderSentAt: null,
+      },
+    });
+  });
+}
+
+/** Staff: cancel any confirmed booking. */
+export async function cancelBooking(db: Db, bookingId: string): Promise<Booking> {
+  const res = await db.booking.updateMany({
+    where: { id: bookingId, status: "CONFIRMED" },
+    data: { status: "CANCELLED", cancelledAt: new Date() },
+  });
+  if (res.count === 0) throw new BookingError("BOOKING_NOT_FOUND");
+  return db.booking.findUniqueOrThrow({ where: { id: bookingId } });
+}
+
+/** Can the customer still cancel online (at least `cancelHoursBefore` hours before start)? */
+export async function canCustomerCancel(db: Db, booking: Pick<Booking, "status" | "startsAt">, now = new Date()) {
+  const s = await db.salonSettings.findUnique({ where: { id: 1 }, select: { cancelHoursBefore: true } });
+  const hours = s?.cancelHoursBefore ?? 24;
+  return booking.status === "CONFIRMED" && booking.startsAt.getTime() - now.getTime() >= hours * 60 * MINUTE;
+}
+
+/** Customer: cancel via the secret link from the e-mail. */
+export async function cancelBookingByToken(db: PrismaClient, token: string, now = new Date()): Promise<Booking> {
+  const booking = await db.booking.findUnique({ where: { cancelToken: token } });
+  if (!booking || booking.status !== "CONFIRMED") throw new BookingError("BOOKING_NOT_FOUND");
+  if (!(await canCustomerCancel(db, booking, now))) throw new BookingError("CANCELLATION_TOO_LATE");
+  return cancelBooking(db, booking.id);
+}
+
+/**
+ * Staff slot picker: like the customer list, but without minimum notice and
+ * with a one-year horizon. Optionally ignores one booking (when moving it).
+ */
+export async function getStaffSlots(
+  db: Db,
+  input: { optionId: string; employeeId: string | null; date: LocalDate; excludeBookingId?: string; now?: Date },
+): Promise<Slot[]> {
+  const option = await db.serviceOption.findUnique({ where: { id: input.optionId } });
+  if (!option) throw new BookingError("OPTION_NOT_FOUND");
+  const rules = { ...(await getBookingRules(db)), minNoticeMin: 0, maxWeeksAhead: 52 };
+  const qualified = (await getQualifiedEmployees(db, option.serviceId)).map((e) => e.id);
+  const ids = input.employeeId ? qualified.filter((id) => id === input.employeeId) : qualified;
+  const { schedules } = await loadSchedules(db, ids, input.date, rules.timezone, { excludeBookingId: input.excludeBookingId });
+  return availableSlots(
+    schedules,
+    { date: input.date, durationMin: option.durationMin, bufferMin: option.bufferMin, now: input.now ?? new Date() },
+    rules,
+  );
 }
