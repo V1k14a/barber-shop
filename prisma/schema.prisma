@@ -26,6 +26,9 @@ model SalonSettings {
   city              String
   phone             String
   email             String
+  /// Map location for the Contact page
+  latitude          Float  @default(55.6761)
+  longitude         Float  @default(12.5683)
   timezone          String @default("Europe/Copenhagen")
   slotStepMin       Int    @default(15)
   maxWeeksAhead     Int    @default(8)

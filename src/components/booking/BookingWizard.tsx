@@ -51,7 +51,7 @@ export function BookingWizard({ services, timezone, today, lastDate, initial }: 
 
   const [serviceId, setServiceId] = useState<string | undefined>(initService?.id);
   const [optionId, setOptionId] = useState<string | undefined>(initOption?.id);
-  const [employeeId, setEmployeeId] = useState<string | undefined>(initOption ? initEmployee : undefined);
+  const [employeeId, setEmployeeId] = useState<string | undefined>(initEmployee);
   const [date, setDate] = useState<string | undefined>();
   const [slot, setSlot] = useState<Slot | undefined>();
   const [step, setStep] = useState<Step>(!initService ? 1 : !initOption ? 2 : !initEmployee ? 3 : 4);
@@ -134,7 +134,8 @@ export function BookingWizard({ services, timezone, today, lastDate, initial }: 
                 onClick={() => {
                   if (o.id !== optionId) setSlot(undefined);
                   setOptionId(o.id);
-                  go(3);
+                  // Employee already chosen (e.g. "Book with Sofie" from the team page) → straight to times.
+                  go(employeeId ? 4 : 3);
                 }}
               />
             ))}

@@ -27,3 +27,17 @@ export const getServiceCatalog = cache(async () => {
     },
   });
 });
+
+/** Active employees with the services they perform, in team order. */
+export const getTeam = cache(async () => {
+  return prisma.employee.findMany({
+    where: { active: true },
+    orderBy: [{ sortOrder: "asc" }, { name: "asc" }],
+    include: {
+      services: {
+        where: { service: { active: true } },
+        include: { service: { select: { id: true, slug: true, name: true, sortOrder: true } } },
+      },
+    },
+  });
+});
