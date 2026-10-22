@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { Prisma, type PrismaClient, type Booking } from "@prisma/client";
 import {
+  addDays,
   availableSlots,
   fitsSchedule,
   isSlotAvailable,
@@ -54,11 +55,11 @@ export async function loadSchedules(
   employeeIds: string[],
   date: LocalDate,
   timezone: string,
-  opts: { excludeBookingId?: string } = {},
+  opts: { excludeBookingId?: string; toDate?: LocalDate } = {},
 ): Promise<{ schedules: EmployeeSchedule[]; bookingCounts: Record<string, number> }> {
-  const day = localDayInterval(date, timezone);
-  const dayStart = new Date(day.start);
-  const dayEnd = new Date(day.end);
+  // Loads data for `date` … `opts.toDate` (inclusive); the engine clips per day.
+  const dayStart = new Date(localDayInterval(date, timezone).start);
+  const dayEnd = new Date(localDayInterval(opts.toDate ?? date, timezone).end);
 
   const [hours, breaks, blocks, bookings] = await Promise.all([
     db.workingHours.findMany({ where: { employeeId: { in: employeeIds } } }),
@@ -119,6 +120,30 @@ export async function getAvailableSlots(
     { date: input.date, durationMin: option.durationMin, bufferMin: option.bufferMin, now: input.now ?? new Date() },
     rules,
   );
+}
+
+/**
+ * For a date strip: which of `days` consecutive dates starting at `from` have
+ * at least one free slot. Loads all data for the range in one go.
+ */
+export async function getAvailableDays(
+  db: Db,
+  input: { optionId: string; employeeId: string | null; from: LocalDate; days: number; now?: Date },
+): Promise<{ date: LocalDate; available: boolean }[]> {
+  const option = await getActiveOption(db, input.optionId);
+  const rules = await getBookingRules(db);
+  const qualified = (await getQualifiedEmployees(db, option.serviceId)).map((e) => e.id);
+  const ids = input.employeeId ? qualified.filter((id) => id === input.employeeId) : qualified;
+  if (input.employeeId && ids.length === 0) throw new BookingError("EMPLOYEE_NOT_QUALIFIED");
+
+  const dates = Array.from({ length: input.days }, (_, i) => addDays(input.from, i, rules.timezone));
+  const { schedules } = await loadSchedules(db, ids, dates[0], rules.timezone, { toDate: dates[dates.length - 1] });
+  const now = input.now ?? new Date();
+  return dates.map((date) => ({
+    date,
+    available:
+      availableSlots(schedules, { date, durationMin: option.durationMin, bufferMin: option.bufferMin, now }, rules).length > 0,
+  }));
 }
 
 export interface CreateBookingInput {
