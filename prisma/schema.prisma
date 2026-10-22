@@ -1,0 +1,203 @@
+// Salon de Choix — database schema
+//
+// Time conventions:
+//   * Absolute moments (bookings, blocked time) are stored in UTC (timestamptz).
+//   * Recurring weekly schedules (working hours, breaks) are stored as local
+//     wall-clock minutes since midnight in the salon's time zone, so that
+//     "09:00" stays 09:00 across daylight-saving changes.
+//   * Money is stored in øre (1 DKK = 100 øre) as integers.
+
+generator client {
+  provider      = "prisma-client-js"
+  binaryTargets = ["native", "linux-musl-openssl-3.0.x"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model SalonSettings {
+  id                Int    @id @default(1)
+  name              String
+  tagline           String @default("")
+  addressLine       String
+  postalCode        String
+  city              String
+  phone             String
+  email             String
+  timezone          String @default("Europe/Copenhagen")
+  slotStepMin       Int    @default(15)
+  maxWeeksAhead     Int    @default(8)
+  cancelHoursBefore Int    @default(24)
+  minNoticeMin      Int    @default(60)
+  /// Public opening hours shown on the Contact page, e.g. [{"days":"Mon–Fri","hours":"09:00–18:00"}]
+  openingHours      Json   @default("[]")
+}
+
+model Service {
+  id          String            @id @default(cuid())
+  name        String
+  slug        String            @unique
+  description String            @default("")
+  sortOrder   Int               @default(0)
+  active      Boolean           @default(true)
+  options     ServiceOption[]
+  employees   EmployeeService[]
+  createdAt   DateTime          @default(now())
+  updatedAt   DateTime          @updatedAt
+}
+
+model ServiceOption {
+  id          String    @id @default(cuid())
+  serviceId   String
+  service     Service   @relation(fields: [serviceId], references: [id], onDelete: Cascade)
+  name        String
+  description String    @default("")
+  durationMin Int
+  priceOre    Int
+  /// Extra time after the appointment (cleaning, drying nails, …) during which the employee is not bookable.
+  bufferMin   Int       @default(0)
+  sortOrder   Int       @default(0)
+  active      Boolean   @default(true)
+  bookings    Booking[]
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@index([serviceId])
+}
+
+model Employee {
+  id           String            @id @default(cuid())
+  name         String
+  title        String            @default("")
+  bio          String            @default("")
+  photoUrl     String?
+  sortOrder    Int               @default(0)
+  active       Boolean           @default(true)
+  services     EmployeeService[]
+  workingHours WorkingHours[]
+  breaks       Break[]
+  blockedTimes BlockedTime[]
+  bookings     Booking[]
+  user         AdminUser?
+  createdAt    DateTime          @default(now())
+  updatedAt    DateTime          @updatedAt
+}
+
+/// Which employee can perform which service (all options of that service).
+model EmployeeService {
+  employeeId String
+  serviceId  String
+  employee   Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  service    Service  @relation(fields: [serviceId], references: [id], onDelete: Cascade)
+
+  @@id([employeeId, serviceId])
+  @@index([serviceId])
+}
+
+/// Weekly recurring working hours. weekday: 1 = Monday … 7 = Sunday (ISO).
+/// Several rows per weekday are allowed (split shifts).
+model WorkingHours {
+  id         String   @id @default(cuid())
+  employeeId String
+  employee   Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  weekday    Int
+  startMin   Int
+  endMin     Int
+
+  @@index([employeeId, weekday])
+}
+
+/// Weekly recurring break (e.g. lunch). Same conventions as WorkingHours.
+model Break {
+  id         String   @id @default(cuid())
+  employeeId String
+  employee   Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  weekday    Int
+  startMin   Int
+  endMin     Int
+  label      String   @default("Break")
+
+  @@index([employeeId, weekday])
+}
+
+enum BlockType {
+  HOLIDAY
+  SICK
+  PRIVATE
+  OTHER
+}
+
+/// One-off blocked period. employeeId = null means the whole salon is closed.
+model BlockedTime {
+  id         String    @id @default(cuid())
+  employeeId String?
+  employee   Employee? @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  startsAt   DateTime  @db.Timestamptz(3)
+  endsAt     DateTime  @db.Timestamptz(3)
+  type       BlockType @default(OTHER)
+  reason     String    @default("")
+  createdAt  DateTime  @default(now())
+
+  @@index([employeeId, startsAt])
+}
+
+enum BookingStatus {
+  CONFIRMED
+  CANCELLED
+  COMPLETED
+  NO_SHOW
+}
+
+enum BookingSource {
+  ONLINE
+  ADMIN
+}
+
+model Booking {
+  id             String        @id @default(cuid())
+  optionId       String
+  option         ServiceOption @relation(fields: [optionId], references: [id], onDelete: Restrict)
+  employeeId     String
+  employee       Employee      @relation(fields: [employeeId], references: [id], onDelete: Restrict)
+  customerName   String
+  customerPhone  String
+  customerEmail  String
+  note           String        @default("")
+  startsAt       DateTime      @db.Timestamptz(3)
+  /// End of the appointment itself (shown to the customer).
+  endsAt         DateTime      @db.Timestamptz(3)
+  /// End including buffer time; the employee is busy until this moment.
+  blockedUntil   DateTime      @db.Timestamptz(3)
+  /// Snapshots so that later price/duration edits don't alter existing bookings.
+  durationMin    Int
+  bufferMin      Int
+  priceOre       Int
+  status         BookingStatus @default(CONFIRMED)
+  source         BookingSource @default(ONLINE)
+  cancelToken    String        @unique
+  reminderSentAt DateTime?     @db.Timestamptz(3)
+  cancelledAt    DateTime?     @db.Timestamptz(3)
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+
+  @@index([employeeId, startsAt])
+  @@index([startsAt, status])
+}
+
+enum Role {
+  OWNER
+  STAFF
+}
+
+model AdminUser {
+  id           String    @id @default(cuid())
+  email        String    @unique
+  passwordHash String
+  role         Role      @default(STAFF)
+  employeeId   String?   @unique
+  employee     Employee? @relation(fields: [employeeId], references: [id], onDelete: SetNull)
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+}
