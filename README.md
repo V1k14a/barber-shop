@@ -1,36 +1,78 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Salon de Choix — website & online booking
 
-## Getting Started
+Website and booking system for a combined barbershop and beauty salon.
+Next.js 15 · TypeScript · Tailwind CSS · PostgreSQL + Prisma · Docker.
 
-First, run the development server:
+> Work in progress. Done so far: database + seed, slot engine + tests.
+> Next: booking flow → public pages → admin panel → e-mails.
+
+## Run everything with Docker
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+cp .env.example .env          # adjust passwords
+docker compose up --build
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+This starts three services:
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+| Service   | What it does |
+|-----------|--------------|
+| `db`      | PostgreSQL 16 (data persisted in the `pgdata` volume) |
+| `migrate` | Applies database migrations and runs the seed, then exits. The seed is idempotent: it never overwrites changes made in the admin panel. |
+| `app`     | The website on http://localhost:3000 |
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+## Local development
 
-## Learn More
+Requirements: Node.js 22, Docker (or a local PostgreSQL 16).
 
-To learn more about Next.js, take a look at the following resources:
+```bash
+cp .env.example .env
+docker compose up -d db       # only the database
+npm install
+npm run db:migrate            # apply migrations
+npm run db:seed               # 4 employees, services, options, hours, accounts
+npm run dev                   # http://localhost:3000
+```
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+### Seeded accounts
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+| E-mail | Role |
+|--------|------|
+| owner@salondechoix.dk | Owner (full access) |
+| sofie@ / mads@ / emma@ / ida@salondechoix.dk | Staff |
 
-## Deploy on Vercel
+Password: value of `SEED_OWNER_PASSWORD` / `SEED_STAFF_PASSWORD` (default `changeme123`). **Change them before going live.**
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+## Tests
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+```bash
+npm test                      # unit tests for the slot engine (no database needed)
+npm run test:integration      # booking + concurrency tests against a real database
+```
+
+Integration tests use `TEST_DATABASE_URL` (default
+`postgresql://salon:salon@localhost:5432/salon_test`). Create that database once:
+
+```bash
+docker compose exec db createdb -U salon salon_test
+```
+
+## How availability works
+
+The slot engine lives in `src/lib/scheduling/` and is pure TypeScript (no
+database), so it's fully unit tested. For each employee and day:
+
+1. Start from the weekly working hours (stored as local wall-clock times).
+2. Subtract breaks, blocked time (holidays, sick days, private, salon closed) and existing bookings, including their buffer time.
+3. Offer start times on a 15-minute grid where the option's full duration **plus buffer** fits.
+4. Drop times in the past, within the minimum notice, or more than 8 weeks ahead.
+
+"No preference" is the union over all qualified employees. On confirm, the booking goes to the
+free employee with the fewest bookings that day.
+
+Double bookings are prevented twice over:
+
+- `createBooking()` re-checks availability inside a `SERIALIZABLE` transaction and retries on conflict.
+- A PostgreSQL exclusion constraint (`Booking_no_overlap`) makes it impossible to store two overlapping confirmed bookings for the same employee.
+
+All instants are stored in UTC and shown in `Europe/Copenhagen`.
